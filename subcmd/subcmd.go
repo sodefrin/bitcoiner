@@ -13,6 +13,10 @@ type cmd interface {
 
 type Subcmd map[string]cmd
 
+var (
+	ErrUnknownCommand = errors.New("usage: bitcoiner <subcmd>")
+)
+
 func NewSubcmd() Subcmd {
 	subcmd := map[string]cmd{}
 
@@ -27,8 +31,13 @@ func NewSubcmd() Subcmd {
 
 func (s Subcmd) Execute(args []string) error {
 	if len(args) < 2 {
-		return errors.New("usage: bitcoiner <subcmd>")
+		return ErrUnknownCommand
 	}
-	cmd := s[args[0]]
-	return cmd.Execute(args[:1])
+
+	cmd, ok := s[args[1]]
+	if ok {
+		return cmd.Execute(args[:1])
+	}
+
+	return ErrUnknownCommand
 }
