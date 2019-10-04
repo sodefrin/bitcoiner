@@ -2,13 +2,32 @@ package marketmake
 
 import (
 	"context"
-	"fmt"
+	"log"
 	"math"
 	"time"
 
+	"github.com/kelseyhightower/envconfig"
 	"github.com/sodefrin/bitflyer"
 	"golang.org/x/sync/errgroup"
 )
+
+type config struct {
+	BitflyerKey    string        `envconfig:"BITFLYER_KEY" required:"true"`
+	BitflyerSecret string        `envconfig:"BITFLYER_SECRET" required:"true"`
+	RiskRate       float64       `envconfig:"RISK_RATE" default:"0.3"`
+	Rot            float64       `envconfig:"ROT" default:"0.01"`
+	Interval       time.Duration `envconfig:"INTERVAL" default:"15s"`
+}
+
+var cfg config
+
+func init() {
+	err := envconfig.Process("", &cfg)
+	if err != nil {
+		envconfig.Usage("", &cfg)
+		log.Fatal(err)
+	}
+}
 
 type MarketMake struct {
 }
@@ -31,6 +50,11 @@ func (m *MarketMake) Execute(args []string) error {
 		return err
 	}
 
+	private, err := bf.PrivateAPIClient(cfg.BitflyerKey, cfg.BitflyerSecret)
+	if err != nil {
+		return err
+	}
+
 	eg, ctx := errgroup.WithContext(ctx)
 
 	eg.Go(func() error {
@@ -38,17 +62,17 @@ func (m *MarketMake) Execute(args []string) error {
 	})
 
 	eg.Go(func() error {
-		return m.run(ctx, realtime)
+		return m.run(ctx, realtime, private)
 	})
 
 	if err := eg.Wait(); err != nil {
-		fmt.Println(err)
+		return err
 	}
 
 	return nil
 }
 
-func (m *MarketMake) run(ctx context.Context, realtime *bitflyer.RealtimeAPIClient) error {
+func (m *MarketMake) run(ctx context.Context, realtime *bitflyer.RealtimeAPIClient, private *bitflyer.PrivateAPIClient) error {
 	duration := time.Second * 5
 
 	ticker := time.NewTicker(duration)
@@ -62,21 +86,48 @@ func (m *MarketMake) run(ctx context.Context, realtime *bitflyer.RealtimeAPIClie
 			ex := realtime.GetExecutions(duration)
 			mid, bids, asks := realtime.GetBoard()
 
-			d2 := m.variance(ex)
+			d2 := variance(ex)
 			d := math.Pow(d2, 0.5)
 
-			examount := m.executionAmount(ex, mid, d)
-			boamount := m.boardAmount(bids, asks, mid, d)
+			examount := executionAmount(ex, mid, d)
+			boamount := boardAmount(bids, asks, mid, d)
 
 			risk := 0.3
 
 			spread := risk*d2 + 2/examount*math.Log(1+risk/boamount)
-			fmt.Println(spread)
+
+			if spread > 20000 {
+				log.Print("spread is too large")
+			}
+
+			pos, err := private.GetPositions()
+			if err != nil {
+				return err
+			}
+
+			size := positionSize(pos)
+			offset := -risk * d2 * size
+
+			log.Printf("spread: %f, offset: %f, size: %f, SELL: %f, BUY: %f, rot: %f", spread, offset, size, mid+offset+spread/2, mid+offset-spread/2, cfg.Rot)
+			eg := errgroup.Group{}
+
+			eg.Go(func() error {
+				_, err := private.CreateOrder("SELL", math.Floor(mid+offset+spread/2), cfg.Rot, "LIMIT")
+				return err
+			})
+			eg.Go(func() error {
+				_, err := private.CreateOrder("BUY", math.Floor(mid+offset-spread/2), cfg.Rot, "LIMIT")
+				return err
+			})
+
+			if err := eg.Wait(); err != nil {
+				return err
+			}
 		}
 	}
 }
 
-func (m *MarketMake) variance(ex []*bitflyer.Execution) float64 {
+func variance(ex []*bitflyer.Execution) float64 {
 	sum := 0.0
 	sum2 := 0.0
 	n := 0.0
@@ -88,7 +139,7 @@ func (m *MarketMake) variance(ex []*bitflyer.Execution) float64 {
 	return sum2/n - (sum/n)*(sum/n)
 }
 
-func (m *MarketMake) executionAmount(ex []*bitflyer.Execution, mid, d float64) float64 {
+func executionAmount(ex []*bitflyer.Execution, mid, d float64) float64 {
 	amount := 0.0
 	for _, v := range ex {
 		if mid-d < v.Price && v.Price < mid+d {
@@ -98,7 +149,7 @@ func (m *MarketMake) executionAmount(ex []*bitflyer.Execution, mid, d float64) f
 	return amount
 }
 
-func (m *MarketMake) boardAmount(bids, asks []*bitflyer.Price, mid, d float64) float64 {
+func boardAmount(bids, asks []*bitflyer.Price, mid, d float64) float64 {
 	amount := 0.0
 	for _, v := range bids {
 		if mid-d < v.Price && v.Price < mid+d {
@@ -111,4 +162,16 @@ func (m *MarketMake) boardAmount(bids, asks []*bitflyer.Price, mid, d float64) f
 		}
 	}
 	return amount
+}
+
+func positionSize(pos []*bitflyer.Position) float64 {
+	var size float64
+	for _, v := range pos {
+		if v.Side == "BUY" {
+			size += v.Size
+		} else {
+			size -= v.Size
+		}
+	}
+	return size
 }

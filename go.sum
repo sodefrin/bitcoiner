@@ -1,3 +1,5 @@
+github.com/kelseyhightower/envconfig v1.4.0 h1:Im6hONhd3pLkfDFsbRgu68RDNkGF1r3dvMUtDTo2cv8=
+github.com/kelseyhightower/envconfig v1.4.0/go.mod h1:cccZRl6mQpaq41TPp5QxidR+Sa3axMbJDNb//FQX6Gg=
 github.com/sodefrin/bitflyer v1.0.0 h1:M2f3V5DiMuyP+Z450hB4SQtB3tyVKdUiIxpY2qiPiO8=
 github.com/sodefrin/bitflyer v1.0.0/go.mod h1:EWLmPKbNt8resCFmW6GUDlFfiy5fxKm8nD25poZdNb4=
 github.com/sodefrin/wsjsonrpc v0.0.1 h1:XjPy5vzTAw5ZYRUuxw5rW4VSmQwJKADhgK660THZyoY=

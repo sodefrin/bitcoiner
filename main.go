@@ -1,7 +1,7 @@
 package main
 
 import (
-	"fmt"
+	"log"
 	"os"
 
 	"github.com/sodefrin/bitcoiner/subcmd"
@@ -11,6 +11,6 @@ func main() {
 	subcmd := subcmd.NewSubcmd()
 
 	if err := subcmd.Execute(os.Args); err != nil {
-		fmt.Println(err)
+		log.Fatal(err)
 	}
 }
