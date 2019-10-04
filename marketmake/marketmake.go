@@ -14,9 +14,9 @@ import (
 type config struct {
 	BitflyerKey    string        `envconfig:"BITFLYER_KEY" required:"true"`
 	BitflyerSecret string        `envconfig:"BITFLYER_SECRET" required:"true"`
-	RiskRate       float64       `envconfig:"RISK_RATE" default:"0.3"`
+	RiskRate       float64       `envconfig:"RISK_RATE" default:"0.1"`
 	Rot            float64       `envconfig:"ROT" default:"0.01"`
-	Interval       time.Duration `envconfig:"INTERVAL" default:"15s"`
+	Interval       time.Duration `envconfig:"INTERVAL" default:"30s"`
 }
 
 var cfg config
@@ -27,6 +27,8 @@ func init() {
 		envconfig.Usage("", &cfg)
 		log.Fatal(err)
 	}
+
+	log.Printf("RiskRate: %f, Rot: %f, Interval: %v", cfg.RiskRate, cfg.Rot, cfg.Interval)
 }
 
 type MarketMake struct {
@@ -73,7 +75,7 @@ func (m *MarketMake) Execute(args []string) error {
 }
 
 func (m *MarketMake) run(ctx context.Context, realtime *bitflyer.RealtimeAPIClient, private *bitflyer.PrivateAPIClient) error {
-	duration := time.Second * 5
+	duration := cfg.Interval
 
 	ticker := time.NewTicker(duration)
 	defer ticker.Stop()
@@ -86,19 +88,18 @@ func (m *MarketMake) run(ctx context.Context, realtime *bitflyer.RealtimeAPIClie
 			ex := realtime.GetExecutions(duration)
 			mid, bids, asks := realtime.GetBoard()
 
+			risk := cfg.RiskRate
 			d2 := variance(ex)
 			d := math.Pow(d2, 0.5)
 
 			examount := executionAmount(ex, mid, d)
 			boamount := boardAmount(bids, asks, mid, d)
 
-			risk := 0.3
+			if boamount == 0 {
+				log.Print("boamount is zero")
+			}
 
 			spread := risk*d2 + 2/examount*math.Log(1+risk/boamount)
-
-			if spread > 20000 {
-				log.Print("spread is too large")
-			}
 
 			pos, err := private.GetPositions()
 			if err != nil {
@@ -108,7 +109,8 @@ func (m *MarketMake) run(ctx context.Context, realtime *bitflyer.RealtimeAPIClie
 			size := positionSize(pos)
 			offset := -risk * d2 * size
 
-			log.Printf("spread: %f, offset: %f, size: %f, SELL: %f, BUY: %f, rot: %f", spread, offset, size, mid+offset+spread/2, mid+offset-spread/2, cfg.Rot)
+			log.Printf("d2: %f, d: %f, mid: %f, spread: %f, offset: %f, size: %f, SELL: %f, BUY: %f, rot: %f", d2, d, mid, spread, offset, size, mid+offset+spread/2, mid+offset-spread/2, cfg.Rot)
+
 			eg := errgroup.Group{}
 
 			eg.Go(func() error {
