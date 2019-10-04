@@ -75,58 +75,95 @@ func (m *MarketMake) Execute(args []string) error {
 }
 
 func (m *MarketMake) run(ctx context.Context, realtime *bitflyer.RealtimeAPIClient, private *bitflyer.PrivateAPIClient) error {
-	duration := cfg.Interval
-
-	ticker := time.NewTicker(duration)
+	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
 
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var err error
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return err
 		case <-ticker.C:
-			ex := realtime.GetExecutions(duration)
-			mid, bids, asks := realtime.GetBoard()
-
-			risk := cfg.RiskRate
-			d2 := variance(ex)
-			d := math.Pow(d2, 0.5)
-
-			examount := executionAmount(ex, mid, d)
-			boamount := boardAmount(bids, asks, mid, d)
-
-			if boamount == 0 {
-				log.Print("boamount is zero")
-			}
-
-			spread := risk*d2 + 2/examount*math.Log(1+risk/boamount)
-
-			pos, err := private.GetPositions()
-			if err != nil {
-				return err
-			}
-
-			size := positionSize(pos)
-			offset := -risk * d2 * size
-
-			log.Printf("d2: %f, d: %f, mid: %f, spread: %f, offset: %f, size: %f, SELL: %f, BUY: %f, rot: %f", d2, d, mid, spread, offset, size, mid+offset+spread/2, mid+offset-spread/2, cfg.Rot)
-
-			eg := errgroup.Group{}
-
-			eg.Go(func() error {
-				_, err := private.CreateOrder("SELL", math.Floor(mid+offset+spread/2), cfg.Rot, "LIMIT")
-				return err
-			})
-			eg.Go(func() error {
-				_, err := private.CreateOrder("BUY", math.Floor(mid+offset-spread/2), cfg.Rot, "LIMIT")
-				return err
-			})
-
-			if err := eg.Wait(); err != nil {
-				return err
-			}
+			go func() {
+				err = m.trade(ctx, realtime, private)
+				cancel()
+			}()
 		}
 	}
+}
+
+func (m *MarketMake) trade(ctx context.Context, realtime *bitflyer.RealtimeAPIClient, private *bitflyer.PrivateAPIClient) error {
+	duration := cfg.Interval
+	ex := realtime.GetExecutions(duration)
+	mid, bids, asks := realtime.GetBoard()
+
+	risk := cfg.RiskRate
+	d2 := variance(ex)
+	d := math.Pow(d2, 0.5)
+
+	examount := executionAmount(ex, mid, d)
+	boamount := boardAmount(bids, asks, mid, d)
+
+	if boamount == 0 {
+		log.Print("boamount is zero")
+	}
+
+	spread := risk*d2 + 2/examount*math.Log(1+risk/boamount)
+
+	pos, err := private.GetPositions()
+	if err != nil {
+		return err
+	}
+
+	size := positionSize(pos)
+	offset := -risk * d2 * size
+
+	log.Printf("d2: %f, d: %f, mid: %f, spread: %f, offset: %f, size: %f, SELL: %f, BUY: %f, rot: %f", d2, d, mid, spread, offset, size, mid+offset+spread/2, mid+offset-spread/2, cfg.Rot)
+
+	eg := errgroup.Group{}
+
+	var sellID string
+	var buyID string
+
+	eg.Go(func() error {
+		id, err := private.CreateOrder("SELL", math.Floor(mid+offset+spread/2), cfg.Rot, "LIMIT")
+		sellID = id
+		return err
+	})
+	eg.Go(func() error {
+		id, err := private.CreateOrder("BUY", math.Floor(mid+offset-spread/2), cfg.Rot, "LIMIT")
+		buyID = id
+		return err
+	})
+
+	if err := eg.Wait(); err != nil {
+		return err
+	}
+
+	time.Sleep(duration)
+
+	sellOrder, err := private.GetOrder(sellID)
+	if err != nil {
+		return err
+	}
+	buyOrder, err := private.GetOrder(buyID)
+	if err != nil {
+		return err
+	}
+
+	if sellOrder.ChildOrderState == "ACTIVE" && buyOrder.ChildOrderState == "ACTIVE" {
+		if err := private.CancelOrder(sellID); err != nil {
+			return err
+		}
+		if err := private.CancelOrder(buyID); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func variance(ex []*bitflyer.Execution) float64 {
