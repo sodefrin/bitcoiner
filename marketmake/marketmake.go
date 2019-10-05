@@ -14,12 +14,13 @@ import (
 type config struct {
 	BitflyerKey    string        `envconfig:"BITFLYER_KEY" required:"true"`
 	BitflyerSecret string        `envconfig:"BITFLYER_SECRET" required:"true"`
-	RiskRate       float64       `envconfig:"RISK_RATE" default:"0.1"`
-	Rot            float64       `envconfig:"ROT" default:"0.01"`
+	RiskRate       float64       `envconfig:"RISK_RATE" default:"1"`
+	RotSize        float64       `envconfig:"ROT_SIZE" default:"0.01"`
 	Interval       time.Duration `envconfig:"INTERVAL" default:"30s"`
 }
 
 var cfg config
+var maxRot = 10.0
 
 func init() {
 	err := envconfig.Process("", &cfg)
@@ -28,7 +29,7 @@ func init() {
 		log.Fatal(err)
 	}
 
-	log.Printf("RiskRate: %f, Rot: %f, Interval: %v", cfg.RiskRate, cfg.Rot, cfg.Interval)
+	log.Printf("RiskRate: %f, Rot: %f, Interval: %v", cfg.RiskRate, cfg.RotSize, cfg.Interval)
 }
 
 type MarketMake struct {
@@ -78,20 +79,9 @@ func (m *MarketMake) run(ctx context.Context, realtime *bitflyer.RealtimeAPIClie
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	var err error
 	for {
-		select {
-		case <-ctx.Done():
-			return err
-		case <-ticker.C:
-			go func() {
-				err = m.trade(ctx, realtime, private)
-				cancel()
-			}()
-		}
+		<-ticker.C
+		return m.trade(ctx, realtime, private)
 	}
 }
 
@@ -102,7 +92,7 @@ func (m *MarketMake) trade(ctx context.Context, realtime *bitflyer.RealtimeAPICl
 
 	risk := cfg.RiskRate
 	d2 := variance(ex)
-	d := math.Pow(d2, 0.5)
+	d := math.Pow(d2, 0.55)
 
 	examount := executionAmount(ex, mid, d)
 	boamount := boardAmount(bids, asks, mid, d)
@@ -111,7 +101,7 @@ func (m *MarketMake) trade(ctx context.Context, realtime *bitflyer.RealtimeAPICl
 		log.Print("boamount is zero")
 	}
 
-	spread := risk*d2 + 2/examount*math.Log(1+risk/boamount)
+	spread := risk*d + 2/examount*math.Log(1+risk/boamount)
 
 	pos, err := private.GetPositions()
 	if err != nil {
@@ -119,9 +109,9 @@ func (m *MarketMake) trade(ctx context.Context, realtime *bitflyer.RealtimeAPICl
 	}
 
 	size := positionSize(pos)
-	offset := -risk * d2 * size
+	offset := -risk * d * size / cfg.RotSize / maxRot
 
-	log.Printf("d2: %f, d: %f, mid: %f, spread: %f, offset: %f, size: %f, SELL: %f, BUY: %f, rot: %f", d2, d, mid, spread, offset, size, mid+offset+spread/2, mid+offset-spread/2, cfg.Rot)
+	log.Printf("d2: %f, d: %f, mid: %f, spread: %f, offset: %f, size: %f, SELL: %f, BUY: %f, rot: %f", d2, d, mid, spread, offset, size, mid+offset+spread/2, mid+offset-spread/2, cfg.RotSize)
 
 	eg := errgroup.Group{}
 
@@ -129,12 +119,12 @@ func (m *MarketMake) trade(ctx context.Context, realtime *bitflyer.RealtimeAPICl
 	var buyID string
 
 	eg.Go(func() error {
-		id, err := private.CreateOrder("SELL", math.Floor(mid+offset+spread/2), cfg.Rot, "LIMIT")
+		id, err := private.CreateOrder("SELL", math.Floor(mid+offset+spread/2), cfg.RotSize, "LIMIT")
 		sellID = id
 		return err
 	})
 	eg.Go(func() error {
-		id, err := private.CreateOrder("BUY", math.Floor(mid+offset-spread/2), cfg.Rot, "LIMIT")
+		id, err := private.CreateOrder("BUY", math.Floor(mid+offset-spread/2), cfg.RotSize, "LIMIT")
 		buyID = id
 		return err
 	})
