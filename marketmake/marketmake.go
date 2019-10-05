@@ -16,11 +16,11 @@ type config struct {
 	BitflyerSecret string        `envconfig:"BITFLYER_SECRET" required:"true"`
 	RiskRate       float64       `envconfig:"RISK_RATE" default:"1"`
 	RotSize        float64       `envconfig:"ROT_SIZE" default:"0.01"`
-	Interval       time.Duration `envconfig:"INTERVAL" default:"30s"`
+	Interval       time.Duration `envconfig:"INTERVAL" default:"15s"`
 }
 
 var cfg config
-var maxRot = 10.0
+var maxRot = 4.0
 
 func init() {
 	err := envconfig.Process("", &cfg)
@@ -46,6 +46,16 @@ func (m *MarketMake) Name() string {
 func (m *MarketMake) Execute(args []string) error {
 	ctx := context.Background()
 
+	for {
+		if err := m.executeCtx(ctx); err != nil {
+			log.Print(err)
+		}
+	}
+}
+
+func (m *MarketMake) executeCtx(ctx context.Context) error {
+	eg, ctx := errgroup.WithContext(ctx)
+
 	bf := bitflyer.NewBitflyer()
 
 	realtime, err := bf.GetRealtimeAPIClient()
@@ -58,8 +68,6 @@ func (m *MarketMake) Execute(args []string) error {
 		return err
 	}
 
-	eg, ctx := errgroup.WithContext(ctx)
-
 	eg.Go(func() error {
 		return realtime.Subscribe(ctx)
 	})
@@ -68,11 +76,7 @@ func (m *MarketMake) Execute(args []string) error {
 		return m.run(ctx, realtime, private)
 	})
 
-	if err := eg.Wait(); err != nil {
-		return err
-	}
-
-	return nil
+	return eg.Wait()
 }
 
 func (m *MarketMake) run(ctx context.Context, realtime *bitflyer.RealtimeAPIClient, private *bitflyer.PrivateAPIClient) error {
@@ -81,27 +85,25 @@ func (m *MarketMake) run(ctx context.Context, realtime *bitflyer.RealtimeAPIClie
 
 	for {
 		<-ticker.C
-		return m.trade(ctx, realtime, private)
+		if err := m.trade(ctx, realtime, private); err != nil {
+			if err := private.CancelAllOrder(); err != nil {
+				log.Print(err)
+			}
+			return err
+		}
 	}
 }
 
 func (m *MarketMake) trade(ctx context.Context, realtime *bitflyer.RealtimeAPIClient, private *bitflyer.PrivateAPIClient) error {
 	duration := cfg.Interval
 	ex := realtime.GetExecutions(duration)
-	mid, bids, asks := realtime.GetBoard()
+	mid, _, _ := realtime.GetBoard()
 
 	risk := cfg.RiskRate
 	d2 := variance(ex)
 	d := math.Pow(d2, 0.55)
 
-	examount := executionAmount(ex, mid, d)
-	boamount := boardAmount(bids, asks, mid, d)
-
-	if boamount == 0 {
-		log.Print("boamount is zero")
-	}
-
-	spread := risk*d + 2/examount*math.Log(1+risk/boamount)
+	spread := risk * d
 
 	pos, err := private.GetPositions()
 	if err != nil {
@@ -109,6 +111,13 @@ func (m *MarketMake) trade(ctx context.Context, realtime *bitflyer.RealtimeAPICl
 	}
 
 	size := positionSize(pos)
+
+	if math.Abs(size) < 0.01 {
+		if err := private.CancelAllOrder(); err != nil {
+			log.Print(err)
+		}
+	}
+
 	offset := -risk * d * size / cfg.RotSize / maxRot
 
 	log.Printf("d2: %f, d: %f, mid: %f, spread: %f, offset: %f, size: %f, SELL: %f, BUY: %f, rot: %f", d2, d, mid, spread, offset, size, mid+offset+spread/2, mid+offset-spread/2, cfg.RotSize)
@@ -133,26 +142,7 @@ func (m *MarketMake) trade(ctx context.Context, realtime *bitflyer.RealtimeAPICl
 		return err
 	}
 
-	time.Sleep(duration)
-
-	sellOrder, err := private.GetOrder(sellID)
-	if err != nil {
-		return err
-	}
-	buyOrder, err := private.GetOrder(buyID)
-	if err != nil {
-		return err
-	}
-
-	if sellOrder.ChildOrderState == "ACTIVE" && buyOrder.ChildOrderState == "ACTIVE" {
-		if err := private.CancelOrder(sellID); err != nil {
-			return err
-		}
-		if err := private.CancelOrder(buyID); err != nil {
-			return err
-		}
-	}
-
+	log.Printf("order created. sellID: %s, buyID: %s", sellID, buyID)
 	return nil
 }
 
@@ -166,31 +156,6 @@ func variance(ex []*bitflyer.Execution) float64 {
 		n++
 	}
 	return sum2/n - (sum/n)*(sum/n)
-}
-
-func executionAmount(ex []*bitflyer.Execution, mid, d float64) float64 {
-	amount := 0.0
-	for _, v := range ex {
-		if mid-d < v.Price && v.Price < mid+d {
-			amount += v.Size
-		}
-	}
-	return amount
-}
-
-func boardAmount(bids, asks []*bitflyer.Price, mid, d float64) float64 {
-	amount := 0.0
-	for _, v := range bids {
-		if mid-d < v.Price && v.Price < mid+d {
-			amount += v.Size
-		}
-	}
-	for _, v := range asks {
-		if mid-d < v.Price && v.Price < mid+d {
-			amount += v.Size
-		}
-	}
-	return amount
 }
 
 func positionSize(pos []*bitflyer.Position) float64 {
