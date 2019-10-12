@@ -13,11 +13,12 @@ import (
 	"github.com/kelseyhightower/envconfig"
 	"github.com/sodefrin/bitflyer"
 	"golang.org/x/sync/errgroup"
+	"github.com/sodefrin/bitcoiner/config"
 	metricpb "google.golang.org/genproto/googleapis/api/metric"
 	monitoringpb "google.golang.org/genproto/googleapis/monitoring/v3"
 )
 
-type config struct {
+type configs struct {
 	ProjectID      string        `envconfig:"PROJECT_ID" required:"true"`
 	BitflyerKey    string        `envconfig:"BITFLYER_KEY" required:"true"`
 	BitflyerSecret string        `envconfig:"BITFLYER_SECRET" required:"true"`
@@ -26,8 +27,8 @@ type config struct {
 	Interval       time.Duration `envconfig:"INTERVAL" default:"15s"`
 }
 
-var cfg config
-var maxRot = 4.0
+var cfg configs
+var maxRot = 6.0
 var logger *log.Logger
 
 func init() {
@@ -59,7 +60,7 @@ func (m *MarketMake) Execute(args []string) error {
 	defer client.Close()
 
 	logger = client.Logger(m.Name()).StandardLogger(logging.Info)
-	logger.Printf("RiskRate: %f, Rot: %f, Interval: %v", cfg.RiskRate, cfg.RotSize, cfg.Interval)
+	logger.Printf("start %s, version: %s, RiskRate: %f, Rot: %f, Interval: %v", m.Name(), config.Version,cfg.RiskRate, cfg.RotSize, cfg.Interval)
 
 	for {
 		if err := m.executeCtx(ctx); err != nil {
@@ -99,7 +100,7 @@ func (m *MarketMake) executeCtx(ctx context.Context) error {
 }
 
 func (m *MarketMake) run(ctx context.Context, realtime *bitflyer.RealtimeAPIClient, private *bitflyer.PrivateAPIClient) error {
-	ticker := time.NewTicker(cfg.Interval)
+	ticker := time.NewTicker(cfg.Interval / 3)
 	defer ticker.Stop()
 
 	for {
