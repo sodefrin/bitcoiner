@@ -8,9 +8,12 @@ import (
 )
 
 func main() {
-	subcmd := subcmd.NewSubcmd()
+	cmds, err := subcmd.NewSubcmd()
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	if err := subcmd.Execute(os.Args); err != nil {
+	if err:=cmds.Execute(os.Args); err != nil {
 		log.Fatal(err)
 	}
 }

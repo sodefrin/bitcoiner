@@ -2,48 +2,38 @@ package marketmake
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"math"
 	"time"
 
-	"cloud.google.com/go/logging"
-	monitoring "cloud.google.com/go/monitoring/apiv3"
-	"github.com/golang/protobuf/ptypes/timestamp"
-	"github.com/kelseyhightower/envconfig"
+	"github.com/sodefrin/bitcoiner/config"
 	"github.com/sodefrin/bitflyer"
 	"golang.org/x/sync/errgroup"
-	"github.com/sodefrin/bitcoiner/config"
-	metricpb "google.golang.org/genproto/googleapis/api/metric"
-	monitoringpb "google.golang.org/genproto/googleapis/monitoring/v3"
 )
 
-type configs struct {
-	ProjectID      string        `envconfig:"PROJECT_ID" required:"true"`
-	BitflyerKey    string        `envconfig:"BITFLYER_KEY" required:"true"`
-	BitflyerSecret string        `envconfig:"BITFLYER_SECRET" required:"true"`
-	RiskRate       float64       `envconfig:"RISK_RATE" default:"1"`
-	RotSize        float64       `envconfig:"ROT_SIZE" default:"0.01"`
-	Interval       time.Duration `envconfig:"INTERVAL" default:"15s"`
-}
-
-var cfg configs
-var maxRot = 6.0
-var logger *log.Logger
-
-func init() {
-	err := envconfig.Process("", &cfg)
-	if err != nil {
-		envconfig.Usage("", &cfg)
-		panic(err)
-	}
-}
-
 type MarketMake struct {
+	logger   *log.Logger
+	realtime *bitflyer.RealtimeAPIClient
+	private  *bitflyer.PrivateAPIClient
+
+	RiskRate float64       `envconfig:"RISK_RATE" default:"1"`
+	RotSize  float64       `envconfig:"ROT_SIZE" default:"0.01"`
+	MaxRot   float64       `envconfig:"MAX_ROT" default:"0.06"`
+	Interval time.Duration `envconfig:"INTERVAL" default:"15s"`
 }
 
-func NewMarketMake() *MarketMake {
-	return &MarketMake{}
+func NewMarketMake(logger *log.Logger, realtime *bitflyer.RealtimeAPIClient, private *bitflyer.PrivateAPIClient) (*MarketMake, error) {
+	marketmake := &MarketMake{}
+
+	if err := config.GetEnv(marketmake); err != nil {
+		return nil, err
+	}
+
+	marketmake.logger = logger
+	marketmake.realtime = realtime
+	marketmake.private = private
+
+	return marketmake, nil
 }
 
 func (m *MarketMake) Name() string {
@@ -53,18 +43,11 @@ func (m *MarketMake) Name() string {
 func (m *MarketMake) Execute(args []string) error {
 	ctx := context.Background()
 
-	client, err := logging.NewClient(ctx, cfg.ProjectID)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-
-	logger = client.Logger(m.Name()).StandardLogger(logging.Info)
-	logger.Printf("start %s, version: %s, RiskRate: %f, Rot: %f, Interval: %v", m.Name(), config.Version,cfg.RiskRate, cfg.RotSize, cfg.Interval)
+	m.logger.Printf("start %s, version: %s, RiskRate: %f, Rot: %f, Interval: %v", m.Name(), config.Version, m.RiskRate, m.RotSize, m.Interval)
 
 	for {
 		if err := m.executeCtx(ctx); err != nil {
-			logger.Println(err)
+			m.logger.Println(err)
 		}
 	}
 }
@@ -72,92 +55,75 @@ func (m *MarketMake) Execute(args []string) error {
 func (m *MarketMake) executeCtx(ctx context.Context) error {
 	eg, ctx := errgroup.WithContext(ctx)
 
-	bf := bitflyer.NewBitflyer()
-
-	realtime, err := bf.GetRealtimeAPIClient()
-	if err != nil {
-		return err
-	}
-
-	private, err := bf.PrivateAPIClient(cfg.BitflyerKey, cfg.BitflyerSecret)
-	if err != nil {
-		return err
-	}
-
 	eg.Go(func() error {
-		return realtime.Subscribe(ctx)
+		return m.realtime.Subscribe(ctx)
 	})
-
 	eg.Go(func() error {
-		return m.run(ctx, realtime, private)
-	})
-
-	eg.Go(func() error {
-		return m.trace(ctx, private)
+		return m.run(ctx)
 	})
 
 	return eg.Wait()
 }
 
-func (m *MarketMake) run(ctx context.Context, realtime *bitflyer.RealtimeAPIClient, private *bitflyer.PrivateAPIClient) error {
-	ticker := time.NewTicker(cfg.Interval / 3)
+func (m *MarketMake) run(ctx context.Context) error {
+	ticker := time.NewTicker(m.Interval)
 	defer ticker.Stop()
 
 	for {
 		<-ticker.C
-		if err := m.trade(ctx, realtime, private); err != nil {
-			if err := private.CancelAllOrder(); err != nil {
-				logger.Print(err)
+		if err := m.trade(ctx); err != nil {
+			if err := m.private.CancelAllOrder(); err != nil {
+				m.logger.Print(err)
 			}
 			return err
 		}
 	}
 }
 
-func (m *MarketMake) trade(ctx context.Context, realtime *bitflyer.RealtimeAPIClient, private *bitflyer.PrivateAPIClient) error {
-	duration := cfg.Interval
+func (m *MarketMake) trade(ctx context.Context) error {
+	duration := m.Interval
 
-	pos, err := private.GetPositions()
+	pos, err := m.private.GetPositions()
 	if err != nil {
 		return err
 	}
 
 	size := positionSize(pos)
 
-	ex := realtime.GetExecutions(duration)
-	mid, _, _ := realtime.GetBoard()
+	ex := m.realtime.GetExecutions(duration)
+	mid, _, _ := m.realtime.GetBoard()
 
-	risk := cfg.RiskRate
+	risk := m.RiskRate
 	d2 := variance(ex)
 	d := math.Pow(d2, 0.55)
 
 	spread := risk * d
 
-	offset := -risk * d * size / cfg.RotSize / maxRot
+	offset := -risk * d * size / m.RotSize / m.MaxRot
 
-	logger.Printf("d2: %f, d: %f, mid: %f, spread: %f, offset: %f, size: %f, SELL: %f, BUY: %f, rot: %f", d2, d, mid, spread, offset, size, mid+offset+spread/2, mid+offset-spread/2, cfg.RotSize)
+	m.logger.Printf("d2: %f, d: %f, mid: %f, spread: %f, offset: %f, size: %f, SELL: %f, BUY: %f", d2, d, mid, spread, offset, size, mid+offset+spread/2, mid+offset-spread/2)
 
 	eg := errgroup.Group{}
 
 	eg.Go(func() error {
 		price := math.Floor(mid + offset + spread/2)
-		id, err := private.CreateOrder("SELL", price, cfg.RotSize, "LIMIT")
+		id, err := m.private.CreateOrder("SELL", price, m.RotSize, "LIMIT")
 		if err != nil {
 			return err
 		}
-		time.Sleep(cfg.Interval)
-		logger.Printf("order created. sellID: %s, price: %f", id, price)
-		return private.CancelOrder(id)
+		time.Sleep(m.Interval)
+		m.logger.Printf("order created. sellID: %s, price: %f", id, price)
+		return m.private.CancelOrder(id)
 	})
 	eg.Go(func() error {
 		price := math.Floor(mid + offset - spread/2)
-		id, err := private.CreateOrder("BUY", price, cfg.RotSize, "LIMIT")
+		id, err := m.private.CreateOrder("BUY", price, m.RotSize, "LIMIT")
 		if err != nil {
 			return err
 		}
-		time.Sleep(cfg.Interval)
-		logger.Printf("order created. buyID: %s, price: %f", id, price)
-		return private.CancelOrder(id)
+		time.Sleep(m.Interval)
+		m.logger.Printf("order created. buyID: %s, price: %f", id, price)
+		return m.private.CancelOrder(id)
 	})
 
 	if err := eg.Wait(); err != nil {
@@ -189,59 +155,4 @@ func positionSize(pos []*bitflyer.Position) float64 {
 		}
 	}
 	return size
-}
-
-func (m *MarketMake) trace(ctx context.Context, private *bitflyer.PrivateAPIClient) error {
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			c, err := private.GetCollateral()
-			if err != nil {
-				logger.Printf("failed to GetCollateral: %s", err.Error())
-			}
-			if err := traceCollateral(ctx, c.Collateral); err != nil {
-				logger.Printf("failed to GetCollateral: %s", err.Error())
-			}
-			logger.Printf("trace collateral %f", c.Collateral)
-		}
-	}
-}
-
-func traceCollateral(ctx context.Context, value float64) error {
-	c, err := monitoring.NewMetricClient(ctx)
-	if err != nil {
-		return err
-	}
-	now := &timestamp.Timestamp{
-		Seconds: time.Now().Unix(),
-	}
-	req := &monitoringpb.CreateTimeSeriesRequest{
-		Name: "projects/" + cfg.ProjectID,
-		TimeSeries: []*monitoringpb.TimeSeries{{
-			Metric: &metricpb.Metric{
-				Type: "custom.googleapis.com/collateral",
-			},
-			Points: []*monitoringpb.Point{{
-				Interval: &monitoringpb.TimeInterval{
-					EndTime: now,
-				},
-				Value: &monitoringpb.TypedValue{
-					Value: &monitoringpb.TypedValue_DoubleValue{
-						DoubleValue: value,
-					},
-				},
-			}},
-		}},
-	}
-
-	err = c.CreateTimeSeries(ctx, req)
-	if err != nil {
-		return fmt.Errorf("could not write time series value, %v ", err)
-	}
-	return nil
 }
