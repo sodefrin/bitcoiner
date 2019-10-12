@@ -37,6 +37,8 @@ github.com/kelseyhightower/envconfig v1.4.0 h1:Im6hONhd3pLkfDFsbRgu68RDNkGF1r3dv
 github.com/kelseyhightower/envconfig v1.4.0/go.mod h1:cccZRl6mQpaq41TPp5QxidR+Sa3axMbJDNb//FQX6Gg=
 github.com/sodefrin/bitflyer v1.0.11 h1:Ig5kJC5CQ4GV2XHOh8zKsuvx4QE+ZHBz3RhsGUB6MNg=
 github.com/sodefrin/bitflyer v1.0.11/go.mod h1:EWLmPKbNt8resCFmW6GUDlFfiy5fxKm8nD25poZdNb4=
+github.com/sodefrin/bitflyer v1.0.12 h1:M/USm8JRK+HfX0KuzpskveQ9lQDzR9lBkmcpl2yQdNM=
+github.com/sodefrin/bitflyer v1.0.12/go.mod h1:EWLmPKbNt8resCFmW6GUDlFfiy5fxKm8nD25poZdNb4=
 github.com/sodefrin/wsjsonrpc v0.0.1 h1:XjPy5vzTAw5ZYRUuxw5rW4VSmQwJKADhgK660THZyoY=
 github.com/sodefrin/wsjsonrpc v0.0.1/go.mod h1:Srx1yOL46Yt5vPWnP7UH1boGg2D4ZZChn/gedqKaJ8U=
 go.opencensus.io v0.21.0/go.mod h1:mSImk1erAIZhrmZN+AvHh14ztQfjbGwt4TtuofqLduU=

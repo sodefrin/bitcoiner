@@ -7,6 +7,7 @@ import (
 	"github.com/sodefrin/bitcoiner/config"
 	"github.com/sodefrin/bitcoiner/logger"
 	"github.com/sodefrin/bitcoiner/marketmake"
+	"github.com/sodefrin/bitcoiner/sma"
 	"github.com/sodefrin/bitcoiner/trace"
 	"github.com/sodefrin/bitflyer"
 	"golang.org/x/sync/errgroup"
@@ -66,6 +67,12 @@ func (s *Subcmd) Execute(args []string) error {
 			return err
 		}
 		cmd = mm
+	case "sma":
+		sma, err := sma.NewSma(l, realtime, private)
+		if err != nil {
+			return err
+		}
+		cmd = sma
 	}
 
 	ctx := context.Background()
