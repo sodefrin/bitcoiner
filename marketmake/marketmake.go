@@ -92,7 +92,7 @@ func (m *MarketMake) executeCtx(ctx context.Context) error {
 	})
 
 	eg.Go(func() error {
-		return m.trace(ctx)
+		return m.trace(ctx, private)
 	})
 
 	return eg.Wait()
@@ -138,23 +138,24 @@ func (m *MarketMake) trade(ctx context.Context, realtime *bitflyer.RealtimeAPICl
 
 	eg := errgroup.Group{}
 
-	var sellID string
-	var buyID string
-
 	eg.Go(func() error {
-		id, err := private.CreateOrder("SELL", math.Floor(mid+offset+spread/2), cfg.RotSize, "LIMIT")
+		price := math.Floor(mid + offset + spread/2)
+		id, err := private.CreateOrder("SELL", price, cfg.RotSize, "LIMIT")
 		if err != nil {
 			return err
 		}
 		time.Sleep(cfg.Interval)
+		logger.Printf("order created. sellID: %s, price: %f", id, price)
 		return private.CancelOrder(id)
 	})
 	eg.Go(func() error {
-		id, err := private.CreateOrder("BUY", math.Floor(mid+offset-spread/2), cfg.RotSize, "LIMIT")
+		price := math.Floor(mid + offset - spread/2)
+		id, err := private.CreateOrder("BUY", price, cfg.RotSize, "LIMIT")
 		if err != nil {
 			return err
 		}
 		time.Sleep(cfg.Interval)
+		logger.Printf("order created. buyID: %s, price: %f", id, price)
 		return private.CancelOrder(id)
 	})
 
@@ -162,7 +163,6 @@ func (m *MarketMake) trade(ctx context.Context, realtime *bitflyer.RealtimeAPICl
 		return err
 	}
 
-	logger.Printf("order created. sellID: %s, buyID: %s", sellID, buyID)
 	return nil
 }
 
@@ -190,14 +190,23 @@ func positionSize(pos []*bitflyer.Position) float64 {
 	return size
 }
 
-func (m *MarketMake) trace(ctx context.Context) error {
+func (m *MarketMake) trace(ctx context.Context, private *bitflyer.PrivateAPIClient) error {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
 	for {
-		<-ticker.C
-		if err := traceCollateral(ctx, 1.0); err != nil {
+		select {
+		case <-ctx.Done():
 			return nil
+		case <-ticker.C:
+			c, err := private.GetCollateral()
+			if err != nil {
+				logger.Printf("failed to GetCollateral: %s", err.Error())
+			}
+			if err := traceCollateral(ctx, c.Collateral); err != nil {
+				logger.Printf("failed to GetCollateral: %s", err.Error())
+			}
+			logger.Printf("trace collateral %f", c.Collateral)
 		}
 	}
 }
@@ -228,7 +237,6 @@ func traceCollateral(ctx context.Context, value float64) error {
 			}},
 		}},
 	}
-	log.Printf("writeTimeseriesRequest: %+v\n", req)
 
 	err = c.CreateTimeSeries(ctx, req)
 	if err != nil {
