@@ -2,14 +2,19 @@ package marketmake
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math"
 	"time"
 
 	"cloud.google.com/go/logging"
+	monitoring "cloud.google.com/go/monitoring/apiv3"
+	"github.com/golang/protobuf/ptypes/timestamp"
 	"github.com/kelseyhightower/envconfig"
 	"github.com/sodefrin/bitflyer"
 	"golang.org/x/sync/errgroup"
+	metricpb "google.golang.org/genproto/googleapis/api/metric"
+	monitoringpb "google.golang.org/genproto/googleapis/monitoring/v3"
 )
 
 type config struct {
@@ -84,6 +89,10 @@ func (m *MarketMake) executeCtx(ctx context.Context) error {
 
 	eg.Go(func() error {
 		return m.run(ctx, realtime, private)
+	})
+
+	eg.Go(func() error {
+		return m.trace(ctx)
 	})
 
 	return eg.Wait()
@@ -179,4 +188,51 @@ func positionSize(pos []*bitflyer.Position) float64 {
 		}
 	}
 	return size
+}
+
+func (m *MarketMake) trace(ctx context.Context) error {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+
+	for {
+		<-ticker.C
+		if err := traceCollateral(ctx, 1.0); err != nil {
+			return nil
+		}
+	}
+}
+
+func traceCollateral(ctx context.Context, value float64) error {
+	c, err := monitoring.NewMetricClient(ctx)
+	if err != nil {
+		return err
+	}
+	now := &timestamp.Timestamp{
+		Seconds: time.Now().Unix(),
+	}
+	req := &monitoringpb.CreateTimeSeriesRequest{
+		Name: "projects/" + cfg.ProjectID,
+		TimeSeries: []*monitoringpb.TimeSeries{{
+			Metric: &metricpb.Metric{
+				Type: "custom.googleapis.com/collateral",
+			},
+			Points: []*monitoringpb.Point{{
+				Interval: &monitoringpb.TimeInterval{
+					EndTime: now,
+				},
+				Value: &monitoringpb.TypedValue{
+					Value: &monitoringpb.TypedValue_DoubleValue{
+						DoubleValue: value,
+					},
+				},
+			}},
+		}},
+	}
+	log.Printf("writeTimeseriesRequest: %+v\n", req)
+
+	err = c.CreateTimeSeries(ctx, req)
+	if err != nil {
+		return fmt.Errorf("could not write time series value, %v ", err)
+	}
+	return nil
 }
